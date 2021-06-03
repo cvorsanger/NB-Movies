@@ -1,0 +1,321 @@
+---
+title: "COMP 4442 Final"
+author: "Corey Vorsanger"
+date: "6/6/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages("tidytext")
+library(tidytext)
+#install.packages("tidyverse")
+library(tidyverse)
+#install.packages("caret")
+library(caret)
+#install.packages("naivebayes")
+library(naivebayes)
+#install.packages("SnowballC")
+library(SnowballC)
+```
+
+# Building a Naive Bayes Classifier
+
+Below is a sample Naive Bayes Classifier. Multiple models were built and the best was chosen. Enough prose to analyze the code is given in this R markdown. However; this should not be considered a substitute for the much more in depth Final Paper also provided.
+
+## Loading the Data
+
+Load the data provided in the "Final.csv" data set. THe data set has 6 variables but we only care about 3 of these:
+
+  genres: character: a string representation of the genre(s) the movie is considered
+  plot: character: a list of viewer submitted plots from the IMDb database
+  title: character: the title of the movie; "title" should be made all uppercase to avoid confusion later
+
+```{r load data}
+movies <- read.csv("Final.csv")
+glimpse(movies)
+movies <- dplyr::select(movies, c(title, genres, plot)) %>%
+  rename(TITLE = title)
+glimpse(movies)
+```
+## Cleaning the Data
+
+The data was cleaned in the following ways:
+
+  Genre: The "IMAX" genre was deleted, and movies with no genre given were dropped from the data set
+  Plot: Movies with no plot given were dropped from the data set.
+  
+```{r data cleaning}
+movies$genres <- lapply(movies$genres, str_remove, pattern = '[\\|]*IMAX')
+movies$genres <- lapply(movies$genres, str_remove, 
+                        pattern = '\\(no genres listed\\)')
+movies$genres <- lapply(movies$genres, str_split, pattern = "\\|")
+movies$genres <- lapply(movies$genres, unlist)
+movies[movies == ""] <- NA
+
+movies$plot <- ifelse(movies$plot == '', NA, movies$plot)
+
+movies <- movies[!is.na(movies$plot),]
+movies <- movies[!is.na(movies$genres),]
+```
+
+The percentage of genres is given below. Remember that this is a multilabel problem, movies can belong to multiple genres. Therefore; the percentages will sum up to above 100%.
+
+```{r genre dist.}
+genre.counts <- as.data.frame(table(unlist(movies$genres))) %>% 
+  arrange(-Freq) %>% 
+  rename(Genre = Var1)
+
+g <- ggplot(data = genre.counts, aes(x=reorder(Genre, -Freq), 
+                                     y=Freq/nrow(movies)*100)) + 
+  geom_col(show.legend = FALSE, aes(fill = Genre)) +
+  labs(title = 'Amount of Movies Labeled Each Genre', x = 'Genres', 
+       y = 'Percentage of Movies') +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 45)) 
+g
+```
+
+## Feature Engineering
+
+To build the model we must encode the genres and we will use a BOW method to handle the plot summaries.
+
+### Genres
+
+Genres were encoded. Each genre will have its own column with 1 if movie is a particular genre and 0 if not
+
+```{r feature engineering genres}
+genres <- genre.counts$Genre
+for (i in 1:nrow(movies)){
+  for (g in genres){
+    movies[i,g] = ifelse(g %in% unlist(movies$genres[i]), 1 ,0)
+  }
+}
+movies <- dplyr::select(movies, -genres)
+```
+
+### Plots
+
+Transform the plots into a bag of words. Words will be tokenized, stemmed, and common words (or stopwords if you will) will not be considered. Each word token will be considered as its own feature into the model. 2 sizes of corpuses will be generated.
+
+```{r feature engineering plot}
+# Delete viewer information
+movies$plot <- lapply(movies$plot, str_replace_all, 
+                      pattern = "\\:\\:[\\w\\d\\s@.()<>{}-]*'", replacement = '')
+movies$plot <- lapply(movies$plot, str_replace_all, 
+                      pattern = "[[:digit:]]", replacement = '')
+
+#Creates the corpus
+BOW.corpus <- function(size, data) {
+  corpus <- data %>% unnest_tokens(word, 'plot') %>% 
+    anti_join(stop_words)
+  corpus$word<- wordStem(corpus$word)
+  corpus <- count(corpus, word) %>% 
+    filter(n>=size) %>%
+    pull(word)
+  return(corpus)
+}
+
+corpus.large <- BOW.corpus(250, movies)
+corpus.small <- BOW.corpus(500, movies)
+
+#Generates a bag of words in a given corpus
+BOW <- function(corpus, data){
+  bag <- data %>% unnest_tokens(word, 'plot',) %>% 
+    anti_join(stop_words)
+  bag$word <- wordStem(bag$word)
+  bag <- filter(bag, word %in% corpus) %>%
+    count(TITLE, word) %>%
+    spread(word, as.integer(n)) %>%
+    map_df(replace_na, 0L)
+  return(bag)
+}
+
+bow.large <- BOW(corpus.large, movies)
+bow.small <- BOW(corpus.small, movies)
+
+movies <- dplyr::select(movies, -plot)
+#Join the BOW to the genres and movie title data
+movies.large <- movies %>% full_join(bow.large, by = 'TITLE') 
+movies.large[is.na(movies.large)] <- 0L
+
+movies.small <- movies %>% full_join(bow.small, by = 'TITLE') 
+movies.small[is.na(movies.small)] <- 0L
+```
+
+## Model Creation
+
+### Data Segmentation
+
+There will be 4 models considered. To evaluate these models split the data into training (80%), validation (10%), and testing (10%) splits.
+
+```{r data splits}
+set.seed(12345)
+n <- nrow(movies)
+tvt <- sample(rep(0:2,c(round(n*.10),round(n*.10),n-2 *round(n*.10))), n)
+
+movies.large.test <- movies.large[tvt==0,]
+movies.large.valid <- movies.large[tvt==1,]
+movies.large.train <- movies.large[tvt==2,]
+
+movies.small.test <- movies.small[tvt==0,]
+movies.small.valid <- movies.small[tvt==1,]
+movies.small.train <- movies.small[tvt==2,]
+```
+
+### Candidate Models
+
+4 candidate models will be considered:
+
+  1) A large corpus with a Poisson event model Naive Bayes Classifier
+  1) A large corpus with a Gaussian event model Naive Bayes Classifier
+  1) A small corpus with a Poisson event model Naive Bayes Classifier
+  1) A small corpus with a Gaussian event model Naive Bayes Classifier
+  
+Note that a classifier is fit for each genre, so a total of 72 classifiers were fit. For each of the 4 overall models; the models were trained with the training data, predictions were made with the validation data, and the predictions were scored.
+
+```{r candidate models}
+nb = list()
+preds = list()
+mats = list()
+for (g in genres){
+  nb[['large']][['poisson']][[g]]<- naive_bayes(y = as.factor(movies.large.train[,g]), 
+                         x = movies.large.train[,20:ncol(movies.large)], 
+                         usepoisson = TRUE,
+                         laplace = 1)
+  preds[['large']][['poisson']][[g]] <- predict(nb[['large']][['poisson']][[g]], 
+                                   movies.large.valid[,20:ncol(movies.large)])
+  mats[['large']][['poisson']][[g]] <- confusionMatrix(preds[['large']][['poisson']][[g]], 
+                       as.factor(movies.large.valid[,g]), 
+                       mode = "everything", 
+                       positive =  "1")
+  
+  nb[['large']][['guas']][[g]]<- naive_bayes(y = as.factor(movies.large.train[,g]), 
+                         x = movies.large.train[,20:ncol(movies.large)])
+  preds[['large']][['guas']][[g]] <- predict(nb[['large']][['guas']][[g]], 
+                                   movies.large.valid[,20:ncol(movies.large)])
+  mats[['large']][['guas']][[g]] <- confusionMatrix(preds[['large']][['guas']][[g]], 
+                       as.factor(movies.large.valid[,g]), 
+                       mode = "everything", 
+                       positive =  "1")
+  
+  nb[['small']][['poisson']][[g]] <- naive_bayes(y = as.factor(movies.small.train[,g]), 
+                                    x = movies.small.train[,20:ncol(movies.small)], 
+                                    usepoisson = TRUE, 
+                                    laplace = 1)
+  preds[['small']][['poisson']][[g]] <- predict(nb[['small']][['poisson']][[g]], 
+                                   movies.small.valid[,20:ncol(movies.small)])
+  mats[['small']][['poisson']][[g]] <- confusionMatrix(preds[['small']][['poisson']][[g]], 
+                       as.factor(movies.small.valid[,g]), 
+                       mode = "everything", 
+                       positive =  "1")
+  
+  nb[['small']][['guas']][[g]] <- naive_bayes(y = as.factor(movies.small.train[,g]), 
+                                    x = movies.small.train[,20:ncol(movies.small)])
+  preds[['small']][['guas']][[g]] <- predict(nb[['small']][['guas']][[g]], 
+                                   movies.small.valid[,20:ncol(movies.small)])
+  mats[['small']][['guas']][[g]] <- confusionMatrix(preds[['small']][['guas']][[g]], 
+                       as.factor(movies.small.valid[,g]), 
+                       mode = "everything", 
+                       positive =  "1")
+}
+```
+
+### Candidate Evaluations
+
+For each of the 4 overall models, an overall confusion matrix was computed by aggregating the results for each genre. The accuracy, recall, precision, and f1 score were compared. It was found that the Poisson event model classifiers performed much better. The larger corpus had a slightly better accuracy therefore; that was chosen as the final model.
+
+```{r candidate evaluation}
+acc <- list()
+recall <- list()
+precision <- list()
+f1 <- list()
+for (size in c('small','large')){
+  for (dist in c('guas','poisson')){
+    tp <- 0
+    tn <- 0
+    fp <- 0
+    fn <- 0  
+    for (g in genres){
+      tp <- tp + mats[[size]][[dist]][[g]][['table']][2,2]
+      tn <- tn + mats[[size]][[dist]][[g]][['table']][1,1]
+      fp <- fp + mats[[size]][[dist]][[g]][['table']][2,1]
+      fn <- fn + mats[[size]][[dist]][[g]][['table']][1,2]
+    }
+    acc[[size]][[dist]] <- (tp + tn) / (tp + tn + fp + fn)
+    precision[[size]][[dist]] <- (tp)/(tp + fp)
+    recall[[size]][[dist]] <- tp/(tp + fn)
+    f1[[size]][[dist]] <- 2*(precision[[size]][[dist]] * recall[[size]][[dist]])/
+      (precision[[size]][[dist]] + recall[[size]][[dist]])
+  }
+}
+cat("Chosen Model Accuracy:", acc[['large']][['poisson']])
+cat("Chosen Model Precision:", precision[['large']][['poisson']])
+cat("Chosen Model Recall:", recall[['large']][['poisson']])
+cat("Chosen Model F1 Score:", f1[['large']][['poisson']])
+```
+
+### Model Testing
+
+For the final model, large corpus and poisson event model, more predictions were made with test split. Model metrics were similar to that of the validation set so no overfitting seesm to be present.
+
+```{r testing}
+preds.test <- list()
+mats.test <- list()
+for (g in genres){
+  preds.test[[g]] <- predict(nb[['large']][['poisson']][[g]], 
+                                   movies.large.test[,20:ncol(movies.large)])
+  mats.test[[g]] <- confusionMatrix(preds.test[[g]], 
+                       as.factor(movies.large.test[,g]), 
+                       mode = "everything", 
+                       positive =  "1")
+}
+
+tp <- 0
+tn <- 0
+fp <- 0
+fn <- 0  
+for (g in genres){
+  tp <- tp + mats.test[[g]][['table']][2,2]
+  tn <- tn + mats.test[[g]][['table']][1,1]
+  fp <- fp + mats.test[[g]][['table']][2,1]
+  fn <- fn + mats.test[[g]][['table']][1,2]
+}
+a<-(tp + tn) / (tp + tn + fp + fn)
+p<-(tp)/(tp + fp)
+r<-tp/(tp + fn)
+f<-2*(p * r)/(p + r)
+cat("Test Accuracy:", a)
+cat("Test Precision:", p)
+cat("Test Recall:", r)
+cat("Test F1 Score:", f)
+```
+
+It is interesting to see the metrics for each individual genre. In general, genres with more instances seemed to have lower accuracy but much higher precision. Genres with a handful of instances had high accuracy but terrible precision scores. Overall, the best genre seemed to be Westerns.
+
+```{r metic plots}
+q <- data.frame(Genre = c(), Metric=c(), Score= c())
+i = 1
+for (g in genres){
+  q[i, 'Genre'] <- g
+  q[i, 'Metric'] <- 'Accuracy'
+  q[i, 'Score'] <- mats.test[[g]][['overall']][['Accuracy']]
+  i <- i+1
+  q[i, 'Genre'] <- g
+  q[i, 'Metric'] <- 'Precision'
+  q[i, 'Score'] <- mats.test[[g]][['byClass']][['Precision']]
+  i <- i+1
+  q[i, 'Genre'] <- g
+  q[i, 'Metric'] <- 'Recall'
+  q[i, 'Score'] <- mats.test[[g]][['byClass']][['Recall']]
+  i <- i+1
+  q[i, 'Genre'] <- g
+  q[i, 'Metric'] <- 'F1 Score'
+  q[i, 'Score'] <- mats.test[[g]][['byClass']][['F1']]
+  i <- i+1
+}
+g <- ggplot(data = q, aes(x = Genre, y = Score, fill = Metric)) + 
+  geom_col(width= 0.75, position = position_dodge()) +
+  theme(axis.text.x = element_text(angle = 90)) 
+g
+```
