@@ -1,0 +1,12 @@
+# Ignore these file extensions
+*.png
+*.jpg
+*.docx
+*.pptx
+*.pdf
+*.zip
+
+# Ignore these files
+*Proposal*
+IMDb*
+wiki*
