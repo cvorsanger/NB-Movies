@@ -1,0 +1,10 @@
+channels:
+  - conda-forge
+dependencies:
+  - r-base=4.1
+  - r-tidyverse
+  - r-tidytext
+  - r-SnowballC
+  - r-caret
+  - r-naivebayes
+  
