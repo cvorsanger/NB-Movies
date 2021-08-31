@@ -1,3 +1,5 @@
+[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/cvorsanger/NB-Movies/master)
+
 This is my Statistics II Class Final Project.
 
 In it I build a Naive Bayes classifier to predict movie genres from their plot. 
