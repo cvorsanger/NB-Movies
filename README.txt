@@ -1,4 +1,4 @@
-[![Binder](https://mybinder.org/badge_logo.svg)] (https://mybinder.org/v2/gh/cvorsanger/NB-Movies/master)
+[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/cvorsanger/NB-Movies/master?urlpath=rstudio)
 
 This is my Statistics II Class Final Project.
 
